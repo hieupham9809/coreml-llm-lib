@@ -5,15 +5,26 @@ import Tokenizers
 class TextGenerator {
     let pipeline: ModelPipeline
     let tokenizer: Tokenizer
-    // var strategy: Strategy = .argmax // etc.
 
+    /// Initializes the TextGenerator with a model pipeline and tokenizer.
+    /// - Parameters:
+    ///   - pipeline: The model pipeline used for text generation.
+    ///   - tokenizer: The tokenizer used to encode and decode text.
     init(pipeline: ModelPipeline, tokenizer: Tokenizer) {
         self.pipeline = pipeline
         self.tokenizer = tokenizer
+        Task {
+            try pipeline.load()
+        }
     }
 
+    /// Generates text based on the input text and maximum number of new tokens.
+    /// - Parameters:
+    ///   - text: The input text to generate text from.
+    ///   - maxNewTokens: The maximum number of new tokens to generate.
+    ///   - stopToken: The token that indicates the end of the conversation.
+    /// - Throws: An error if text generation fails.
     func generate(text: String, maxNewTokens: Int) async throws {
-
         let loadTimer = CodeTimer()
         try pipeline.load()
         let loadDuration = loadTimer.elapsed()
@@ -24,7 +35,7 @@ class TextGenerator {
         tokens.forEach { print($0, terminator: " ") }
         fflush(stdout)
 
-        for try await prediction in try pipeline.predict(tokens: tokens, maxNewTokens: maxNewTokens) {
+        for try await prediction in try pipeline.predictWithInputTokens(tokens: tokens, maxNewTokens: maxNewTokens) {
             predictions.append(prediction)
             print(prediction.newToken, terminator: " ")
             fflush(stdout)

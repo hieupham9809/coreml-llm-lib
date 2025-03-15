@@ -16,6 +16,11 @@ class ModelPipeline {
 
     let signposter = OSSignposter(subsystem: "com.stephenpanaro.llm-cli", category: "ModelPipeline")
 
+    /// Initializes the ModelPipeline with chunks, cache processor, and logit processor.
+    /// - Parameters:
+    ///   - chunks: The chunks of the model.
+    ///   - cacheProcessor: The cache processor model.
+    ///   - logitProcessor: The logit processor model.
     init(chunks: [PipelineChunk], cacheProcessor: DeferredModel, logitProcessor: LogitProcessor) {
         self.chunks = chunks
         precondition(chunks.count > 0)
@@ -46,6 +51,8 @@ class ModelPipeline {
         print()
     }
 
+    /// Loads the model pipeline.
+    /// - Throws: An error if the model pipeline fails to load.
     func load() throws {
         prewarm()
         print("Loading models  : ", terminator: "")
@@ -72,7 +79,14 @@ class ModelPipeline {
         }
     }
 
-    func predict(tokens initialTokens: [Int], maxNewTokens: Int) throws -> AsyncThrowingStream<Prediction, Error> {
+    /// Predicts the next tokens based on the initial tokens and maximum number of new tokens.
+    /// - Parameters:
+    ///   - tokens: The initial tokens.
+    ///   - maxNewTokens: The maximum number of new tokens to generate.
+    ///   - stopToken: The token that indicates the end of the conversation.
+    /// - Returns: An asynchronous stream of predictions.
+    /// - Throws: An error if prediction fails.
+    func predictWithInputTokens(tokens initialTokens: [Int], maxNewTokens: Int) throws -> AsyncThrowingStream<Prediction, Error> {
         guard let inferenceConfiguration else {
             throw PipelineError.unsupportedInferenceConfiguration
         }
