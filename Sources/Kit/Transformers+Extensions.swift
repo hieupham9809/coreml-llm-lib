@@ -21,6 +21,15 @@ extension AutoTokenizer {
             return try await from(modelFolder: modelFolder, hubApi: hubApi)
         }
     }
+
+    static func fromBundle(
+        model: String,
+        hubApi: HubApi = .shared
+    ) async throws -> Tokenizer {
+        guard let modelFolder = Bundle.module.resourceURL?.appending(path: "Resources/Model/\(model)")
+        else { throw TokenizerError.missingConfig }
+        return try await from(modelFolder: modelFolder, hubApi: hubApi)
+    }
 }
 
 // Not public, so copied over.

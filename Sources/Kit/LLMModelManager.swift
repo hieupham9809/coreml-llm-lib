@@ -9,6 +9,10 @@ public class LLMModelManager {
     private var modelPipeline: ModelPipeline?
     private var tokenizer: Tokenizer?
     private let stopTokens = [128001, 128009]
+    private var downloadTask: Task<URL?, Error>?
+    private var cancellationMonitorTask: Task<Void, Never>?
+    private var isCancelled = false
+    private var hub: HubApi?
 
     public init() {}
 
@@ -21,11 +25,20 @@ public class LLMModelManager {
     ///   - logitProcessorModelName: The name of the logit processor model file.
     ///   - tokenizerName: The name of the tokenizer.
     ///   - verbose: Whether to print verbose output.
+    ///   - progressHandler: An optional callback to report download progress (0.0 to 1.0).
     /// - Throws: An error if the model or tokenizer fails to load.
-    public func loadModel(repoID: String, localModelDirectory: URL? = nil, localModelPrefix: String? = nil, cacheProcessorModelName: String = "cache-processor.mlmodelc", logitProcessorModelName: String = "logit-processor.mlmodelc", tokenizerName: String? = nil, verbose: Bool = false) async throws {
+    public func loadModel(repoID: String, localModelDirectory: URL? = nil, localModelPrefix: String? = nil, cacheProcessorModelName: String = "cache-processor.mlmodelc", logitProcessorModelName: String = "logit-processor.mlmodelc", tokenizerName: String? = nil, verbose: Bool = false, progressHandler: ((Double) -> Void)? = nil) async throws {
+        // Reset cancellation flag
+        isCancelled = false
+        
         var modelDirectory = localModelDirectory
         if !repoID.isEmpty {
-            modelDirectory = try await downloadModel(repoID: repoID)
+            modelDirectory = try await downloadModel(repoID: repoID, progressHandler: progressHandler)
+        }
+
+        // Check for cancellation after download
+        if isCancelled {
+            throw LLMModelManagerError.cancelled
         }
 
         guard let modelDirectory else {
@@ -44,8 +57,26 @@ public class LLMModelManager {
         )
         try modelPipeline?.load()
 
-        self.tokenizer = try await AutoTokenizer.from(cached: tokenizerName, hubApi: .init(hfToken: HubApi.defaultToken()))
+        self.tokenizer = try await AutoTokenizer.fromBundle(model: tokenizerName, hubApi: .init(hfToken: HubApi.defaultToken()))
         if verbose { logger.info("Tokenizer \(tokenizerName) loaded.") }
+    }
+
+    /// Cancels any ongoing model download
+    public func cancelDownload() {
+        logger.info("Cancelling model download")
+        isCancelled = true
+        
+        // Cancel the download task - even if Hub doesn't respond to cancellation directly
+        downloadTask?.cancel()
+        
+        // Force cancel by clearing our Hub reference
+        self.hub = nil
+        
+        // Cancel the monitor task too
+        cancellationMonitorTask?.cancel()
+        
+        downloadTask = nil
+        cancellationMonitorTask = nil
     }
 
     /// Generate text based on the input text and maximum number of new tokens.
@@ -186,17 +217,32 @@ public class LLMModelManager {
         }
     }
 
-    private func downloadModel(repoID: String) async throws -> URL {
-        let hub = HubApi(hfToken: HubApi.defaultToken())
+    private func downloadModel(repoID: String, progressHandler: ((Double) -> Void)? = nil) async throws -> URL? {
+        // Create a fresh Hub instance
+        hub = HubApi(hfToken: HubApi.defaultToken())
+        if Task.isCancelled {
+            throw LLMModelManagerError.cancelled
+        }
+        
         let repo = Hub.Repo(id: repoID, type: .models)
 
         let mlmodelcs = ["Llama*.mlmodelc/*", "logit*", "cache*"]
-        let filenames = try await hub.getFilenames(from: repo, matching: mlmodelcs)
+        let filenames = try await hub?.getFilenames(from: repo, matching: mlmodelcs) ?? []
 
-        let localURL = hub.localRepoLocation(repo)
+        let localURL = hub?.localRepoLocation(repo)
+        guard let localURL else {
+            throw LLMModelManagerError.modelDirectoryNotProvided
+        }
         let localFileURLs = filenames.map {
             localURL.appending(component: $0)
         }
+
+
+        // Check for cancellation
+        if isCancelled {
+            throw LLMModelManagerError.cancelled
+        }
+        
         let anyNotExists = localFileURLs.filter {
             !FileManager.default.fileExists(atPath: $0.path(percentEncoded: false))
         }.count > 0
@@ -216,21 +262,67 @@ public class LLMModelManager {
         }
 
         let needsDownload = anyNotExists || isStale
-        guard needsDownload else { return localURL }
+        guard needsDownload else { 
+            progressHandler?(1.0) // Report as complete if already downloaded
+            return localURL 
+        }
 
         logger.info("Downloading from \(repoID)...")
         if filenames.count == 0 {
             throw LLMModelManagerError.noModelFilesFound
         }
 
-        let downloadDir = try await hub.snapshot(from: repo, matching: mlmodelcs) { progress in
-            let percent = progress.fractionCompleted * 100
-            if !progress.isFinished {
-                logger.debug("\(percent.formatted(.number.precision(.fractionLength(0))))% downloaded")
+        // Create a task for the download
+        downloadTask = Task {
+            return try await hub?.snapshot(from: repo, matching: mlmodelcs) { progress in
+                let percent = progress.fractionCompleted
+                
+                if !progress.isFinished {
+                    logger.debug("\((percent * 100).formatted(.number.precision(.fractionLength(0))))% downloaded")
+                    progressHandler?(percent)
+                } else {
+                    progressHandler?(1.0)
+                }
             }
         }
-        logger.info("Download complete. Files saved to \(downloadDir.path())")
-        return downloadDir
+        
+        // Create a separate task to monitor cancellation status
+        cancellationMonitorTask = Task { [weak self] in
+            while !Task.isCancelled {
+                if let self = self, self.isCancelled {
+                    // If we're cancelled, set hub to nil to try to interrupt the download
+                    self.hub = nil
+                    self.downloadTask?.cancel()
+                    break
+                }
+                // Check cancellation status every 100ms
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        
+        do {
+            guard let downloadTask = downloadTask else {
+                throw LLMModelManagerError.cancelled
+            }
+            
+            let downloadDir = try await downloadTask.value
+            logger.info("Download complete. Files saved to \(downloadDir?.path() ?? "")")
+
+            // Cancel our monitor task
+            cancellationMonitorTask?.cancel()
+            cancellationMonitorTask = nil
+            
+            return downloadDir
+        } catch {
+            // Clean up tasks
+            cancellationMonitorTask?.cancel()
+            cancellationMonitorTask = nil
+            
+            if error is CancellationError || isCancelled || self.hub == nil {
+                throw LLMModelManagerError.cancelled
+            }
+            throw error
+        }
     }
 }
 
@@ -240,6 +332,7 @@ public enum LLMModelManagerError: Error {
     case modelNotLoaded
     case staleFiles
     case noModelFilesFound
+    case cancelled
 }
 
 extension TextGenerator {

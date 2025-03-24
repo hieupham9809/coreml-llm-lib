@@ -25,7 +25,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Transformers", package: "swift-transformers"),
             ],
-            path: "Sources"
+            path: "Sources",
+            resources: [
+                .copy("Kit/Resources")
+            ]
         ),
         .testTarget(
             name: "LLMLibTests",

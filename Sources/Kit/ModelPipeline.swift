@@ -187,10 +187,17 @@ extension ModelPipeline {
         let contents = try manager.contentsOfDirectory(atPath: folder.path(percentEncoded: false))
 
         let chunkFiles = contents
-            .compactMap { ChunkFileInfo(url: folder.appending(path: $0)) }
-            .filter { $0.url.pathExtension == "mlmodelc" }
+            .compactMap {
+                let chunk = ChunkFileInfo(url: folder.appending(path: $0))
+                return chunk
+            }
             .filter {
-                if let modelPrefix { $0.modelPrefix.hasPrefix(modelPrefix) }
+                $0.url.pathExtension == "mlmodelc"
+            }
+            .filter {
+                if let modelPrefix {
+                    $0.modelPrefix.hasPrefix(modelPrefix)
+                }
                 else { true }
             }
             .sorted(by: { $0.chunkNumber < $1.chunkNumber })
@@ -299,15 +306,13 @@ struct ChunkFileInfo {
         self.fileName = url.lastPathComponent
 
         var split = url.deletingPathExtension().lastPathComponent.split(separator: "_")
-        guard
-            let chunkString = split.popLast(),
-            let chunkNumber = Int(chunkString.replacingOccurrences(of: "chunk", with: ""))
+        guard let chunkString = split.popLast()
         else {
             return nil
         }
 
         self.modelPrefix = split.joined(separator: "_") + "_"
-        self.chunkNumber = chunkNumber
+        self.chunkNumber = Int(chunkString.replacingOccurrences(of: "chunk", with: "")) ?? 0
     }
 
     var displayModelName: String {
